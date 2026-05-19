@@ -1,15 +1,20 @@
 ## Environment Setup
 
-To guarantee reproducibility (Python $\ge 3.8$), this project uses **`uv`** for virtual environment and dependency management.
+To guarantee reproducibility (Python >= 3.8), this project uses **`uv`** for virtual environment and dependency management.
 
-### Prerequisites
-Install `uv` if you don't have it yet:
-* **Linux/macOS:** `curl -LsSf https://astral.sh/uv/install.sh | sh`
-* **Windows:** `irm https://astral.sh/uv/install.ps1 | iex`
+### 1. Prerequisites
+Install `uv` if you haven't already:
+* **Linux/macOS:** curl -LsSf [https://astral.sh/uv/install.sh](https://astral.sh/uv/install.sh) | sh
+* **Windows:** irm [https://astral.sh/uv/install.ps1](https://astral.sh/uv/install.ps1) | iex
 
-### Initialization & Usage
+### 2. Configuration
+Create your local environment file from the template and add your CoinGecko API key:
+```bash
+cp .env.example .env
+```
+### 3. Initialization & Usage
 
-**Synchronize the environment:** This creates the local `.venv` and installs the dependencies listed in `uv.lock`.
-   ```bash
-   uv sync
-   ```
+**Synchronize the environment:** (Creates .venv and installs exact dependencies from uv.lock)
+```bash
+uv sync
+````
