@@ -14,6 +14,11 @@ API_BASE_URL = "https://api.coingecko.com/api/v3/coins/{coin_id}/history"
 DATE_FORMAT = "%Y-%m-%d"
 
 
+def _save_to_json(filepath, data):
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+
 def parse_date(date_str: str) -> datetime:
     """Helper function to parse and validate date inputs."""
     try:
@@ -30,6 +35,8 @@ async def fetch_daily_data(
     api_key: str,
 ) -> None:
     """Download historical coin data for a single day and save it to disk."""
+
+    # Note: validation happens prior to task spawning, but serves as a quick runtime sanity check here
     parse_date(date)
 
     try:
@@ -61,9 +68,10 @@ async def fetch_daily_data(
 
     filepath = output_dir / f"{coin_id}_{date}.json"
 
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
-
+    # Writing is a blocking operation, we could hand it to a background thread.
+    # However, we are dealing with small files and low concurrency, so its not a bottleneck.
+    # await asyncio.to_thread(_save_to_json, filepath, data)
+    _save_to_json(filepath, data)
     click.echo(f"Successfully saved data to {filepath}")
 
 
