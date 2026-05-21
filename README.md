@@ -8,7 +8,7 @@ Install `uv` if you haven't already:
 * **Windows:** irm [https://astral.sh/uv/install.ps1](https://astral.sh/uv/install.ps1) | iex
 
 ### 2. Configuration
-Create your local environment file from the template and add your CoinGecko API key:
+Create your local environment file from the template and add your own vars:
 ```bash
 cp .env.example .env
 ```
@@ -17,4 +17,10 @@ cp .env.example .env
 **Synchronize the environment:** (Creates .venv and installs exact dependencies from uv.lock)
 ```bash
 uv sync
-````
+```
+
+**Spin up the PostgreSQL database container** in the background.
+This will also create 2 tables, daily_coin_data and monthly_coin_aggregates.
+```bash
+docker compose up -d
+```
