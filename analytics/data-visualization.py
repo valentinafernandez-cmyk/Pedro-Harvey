@@ -47,7 +47,6 @@ def generate_and_save_plots(df: pd.DataFrame, output_dir: str):
         if coin_id not in plot_df.columns:
             continue
 
-        # Initialize a dedicated canvas for *just* this coin
         fig, ax = plt.subplots(figsize=(10, 5))
 
         ax.plot(
@@ -76,7 +75,6 @@ def generate_and_save_plots(df: pd.DataFrame, output_dir: str):
         specific_output_path = os.path.join(output_dir, f"crypto_trend_{coin_id}.png")
         plt.savefig(specific_output_path, dpi=300)
 
-        # Crucial: Close the figure to free memory while running the loop
         plt.close(fig)
         print(f"📈 Chart successfully generated and saved to: {specific_output_path}")
 
