@@ -3,7 +3,7 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 import click
 import httpx
 from dotenv import load_dotenv
@@ -13,6 +13,8 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.ext.automap import automap_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import select
+
+from queries.execute_query import execute_query
 
 
 load_dotenv()
@@ -227,48 +229,51 @@ async def main_async_flow(
         )
 
 
-@click.command()
+@click.group()
+def cli():
+    """Crypto Analysis Suite CLI - Fetch data or run analysis queries."""
+    pass
+
+
+@cli.command(name="fetch")
 @click.argument("coin-id", type=str)
 @click.argument("start-date", type=str)
+@click.option("--end-date", type=str, default=None, help="Optional end date for range.")
 @click.option(
-    "--end-date",
-    type=str,
-    default=None,
-    help="Optional end date to fetch a range of dates.",
-)
-@click.option(
-    "--max-workers",
-    default=3,
-    show_default=True,
-    help="Max workers spawned when fetching a range.",
+    "--max-workers", default=3, show_default=True, help="Max fetching workers."
 )
 @click.option(
     "--output-dir",
     default="./data",
     type=click.Path(file_okay=False, dir_okay=True, writable=True, path_type=Path),
-    help="Directory to save the output files (ignored if --db is set).",
 )
 @click.option("--db", is_flag=True, help="Store data directly into Postgres database.")
 @click.option(
     "--api-key", envvar="COINGECKO_API_KEY", required=True, help="CoinGecko API Key."
 )
-def cli(
-    coin_id: str,
-    start_date: str,
-    end_date: Optional[str],
-    max_workers: int,
-    output_dir: Path,
-    db: bool,
-    api_key: str,
-) -> None:
-    """CLI entry point to fetch and persist historical coin data from CoinGecko."""
-
-    # Initialize a singular async event loop lifecycle for the application runtime
+def fetch_coin_history(
+    coin_id, start_date, end_date, max_workers, output_dir, db, api_key
+):
+    """Download historical coin data from CoinGecko and store it."""
     asyncio.run(
         main_async_flow(
             coin_id, start_date, end_date, max_workers, api_key, db, output_dir
         )
     )
+
+
+@cli.command(name="monthly-avg")
+def run_monthly_avg():
+    """Calculate the historical average price for each coin grouped by month."""
+    click.echo("📊 Running Monthly Average Price Analysis...")
+    asyncio.run(execute_query("queries/monthly_avg.sql"))
+
+
+@cli.command(name="drop-recovery")
+def run_drop_recovery():
+    """Analyze price recovery averages after a coin drops for 3+ consecutive days."""
+    click.echo("📉 Running 3+ Day Consecutive Drop & Recovery Analysis...")
+    asyncio.run(execute_query("queries/drop_recovery_analysis.sql"))
 
 
 if __name__ == "__main__":
