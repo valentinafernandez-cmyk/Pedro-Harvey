@@ -9,22 +9,6 @@ from sqlalchemy import create_engine
 load_dotenv()
 
 
-def get_crypto_data(engine, days: int = 30) -> pd.DataFrame:
-    """Pulls the whole table via Pandas and filters it in-memory."""
-
-    with engine.connect() as connection:
-        df = pd.read_sql_table(table_name="daily_coin_data", con=connection)
-
-    cutoff_date = datetime.now() - timedelta(days=days)
-    target_coins = ["bitcoin", "ethereum", "cardano"]
-
-    filtered_df = df[(df["coin_id"].isin(target_coins)) & (df["dt"] >= cutoff_date)]
-
-    sorted_df = filtered_df.sort_values(by="dt")  # type: ignore
-
-    return sorted_df[["coin_id", "dt", "price_usd"]]
-
-
 def generate_and_save_plots(df: pd.DataFrame, output_dir: str):
     """Generates and saves completely separate figure images for each asset."""
     if df.empty:
@@ -89,8 +73,18 @@ if __name__ == "__main__":
         db_url = db_url.replace("postgresql+asyncpg://", "postgresql://")
     engine = create_engine(db_url)
 
-    crypto_df = get_crypto_data(engine, days=30)
+    with engine.connect() as connection:
+        df = pd.read_sql_table(table_name="daily_coin_data", con=connection)
 
-    # Point directly to the directory target instead of a file
+    # Plot data processing
+    cutoff_date = datetime.now() - timedelta(days=30)  # Last 30 days
+    target_coins = ["bitcoin", "ethereum", "cardano"]
+
+    filtered_df = df[(df["coin_id"].isin(target_coins)) & (df["dt"] >= cutoff_date)]
+
+    sorted_df = filtered_df.sort_values(by="dt")  # type: ignore
+
+    sorted_df[["coin_id", "dt", "price_usd"]]
+
     output_directory = "./analytics/plots"
-    generate_and_save_plots(crypto_df, output_directory)
+    generate_and_save_plots(sorted_df, output_directory)
