@@ -9,6 +9,7 @@ dependencies = [
     "click>=8.4.0",
     "dotenv>=0.9.9",
     "greenlet>=3.5.1",
+    "holidays>=0.97",
     "httpx>=0.28.1",
     "matplotlib>=3.10.9",
     "pandas>=3.0.3",

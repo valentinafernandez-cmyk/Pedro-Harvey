@@ -339,6 +339,18 @@ wheels = [
 ]
 
 [[package]]
+name = "holidays"
+version = "0.97"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "python-dateutil" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0c/61/058f3f05dd318b9d9546df513f8f6611557919e5360cd608a3ce7c7500d4/holidays-0.97.tar.gz", hash = "sha256:8fe491270bd4aeed6f9584d459d5df506a414727ba76fdd9ebd6323def606935", size = 911304, upload-time = "2026-05-18T19:48:19.37Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b9/54/7947b0cba0c91b81801da793ea2d273aab5bdd5484a5ba6c2d3863110f07/holidays-0.97-py3-none-any.whl", hash = "sha256:0bcd55e64abddce2f9aa9224d68afe87acdd7eac7c2aef251b0ef7986bb5220b", size = 1479247, upload-time = "2026-05-18T19:48:16.881Z" },
+]
+
+[[package]]
 name = "httpcore"
 version = "1.0.9"
 source = { registry = "https://pypi.org/simple" }
@@ -702,6 +714,7 @@ dependencies = [
     { name = "click" },
     { name = "dotenv" },
     { name = "greenlet" },
+    { name = "holidays" },
     { name = "httpx" },
     { name = "matplotlib" },
     { name = "pandas" },
@@ -715,6 +728,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.4.0" },
     { name = "dotenv", specifier = ">=0.9.9" },
     { name = "greenlet", specifier = ">=3.5.1" },
+    { name = "holidays", specifier = ">=0.97" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "matplotlib", specifier = ">=3.10.9" },
     { name = "pandas", specifier = ">=3.0.3" },
