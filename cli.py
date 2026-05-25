@@ -12,7 +12,9 @@ from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.ext.automap import automap_base
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import select
+from sqlalchemy import select, func
+from sqlalchemy.dialects.postgresql import insert
+
 
 from queries.execute_query import execute_query
 
@@ -42,7 +44,10 @@ def parse_date(date_str: str) -> datetime:
 async def write_to_db(
     session: AsyncSession, coin_id: str, date_str: str, payload: dict
 ) -> None:
-    """Inserts daily coin data and recalculates monthly aggregate stats in the db."""
+    """Inserts daily coin data and recalculates monthly aggregate stats in the db safely
+
+    using concurrent-safe PostgreSQL upsert logic.
+    """
     DailyCoinData = Base.classes.daily_coin_data
     MonthlyCoinAggregates = Base.classes.monthly_coin_aggregates
 
@@ -74,30 +79,30 @@ async def write_to_db(
     mo = dt.month
     current_utc_time = datetime.now(timezone.utc).replace(tzinfo=None)
 
-    monthly_query = select(MonthlyCoinAggregates).where(
-        MonthlyCoinAggregates.coin_id == coin_id,
-        MonthlyCoinAggregates.yr == yr,
-        MonthlyCoinAggregates.mo == mo,
+    # Build the base PostgreSQL insertion statement
+    stmt = insert(MonthlyCoinAggregates.__table__).values(
+        coin_id=coin_id,
+        yr=yr,
+        mo=mo,
+        min_price_usd=price_usd,
+        max_price_usd=price_usd,
+        updated_at=current_utc_time,
     )
-    monthly_record = await session.scalar(monthly_query)
 
-    if monthly_record:
-        if price_usd < monthly_record.min_price_usd:
-            monthly_record.min_price_usd = price_usd
-        if price_usd > monthly_record.max_price_usd:
-            monthly_record.max_price_usd = price_usd
+    upsert_stmt = stmt.on_conflict_do_update(
+        constraint="monthly_coin_aggregates_pkey",
+        set_={
+            "min_price_usd": func.least(
+                MonthlyCoinAggregates.__table__.c.min_price_usd, price_usd
+            ),
+            "max_price_usd": func.greatest(
+                MonthlyCoinAggregates.__table__.c.max_price_usd, price_usd
+            ),
+            "updated_at": current_utc_time,
+        },
+    )
 
-        monthly_record.updated_at = current_utc_time
-    else:
-        new_monthly = MonthlyCoinAggregates(
-            coin_id=coin_id,
-            yr=yr,
-            mo=mo,
-            min_price_usd=price_usd,
-            max_price_usd=price_usd,
-            updated_at=current_utc_time,
-        )
-        session.add(new_monthly)
+    await session.execute(upsert_stmt)
 
 
 async def fetch_daily_data(
