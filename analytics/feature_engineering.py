@@ -108,9 +108,6 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     # Drop artificial resampled placeholder empty rows
     df = df.dropna(subset=["price_usd"])
 
-    # # Drop matrix boundary edges lacking full lookback window or lookahead forecast target
-    # df = df.dropna(subset=["next_price", "price_lag_7"])
-
     return df
 
 
@@ -141,9 +138,22 @@ if __name__ == "__main__":
     enriched_df = engineer_features(df)
 
     # Group by coin_id and pull the last row for each group
-    sampled_df = enriched_df.groupby("coin_id").tail(1)
+    sampled_df = enriched_df.groupby("coin_id").tail(3)
 
-    columns_to_hide = [col for col in ["raw_payload"] if col in sampled_df.columns]
+    columns_to_hide = [
+        col
+        for col in [
+            "raw_payload",
+            "id",
+            "price_lag_7",
+            "price_lag_6",
+            "price_lag_5",
+            "price_lag_4",
+            "is_us_holiday",
+            "is_china_holiday",
+        ]
+        if col in sampled_df.columns
+    ]
 
     # Drop the hidden columns on the fly right before printing
     print(sampled_df.drop(columns=columns_to_hide).to_string(index=False))
