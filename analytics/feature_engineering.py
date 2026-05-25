@@ -34,42 +34,22 @@ def get_risk_summary(df: pd.DataFrame) -> pd.Series:
     # This creates a clean Series indexed by coin_id: e.g., bitcoin -> "Low risk"
     return overall_worst_drop.apply(assign_tier).rename("risk_tier")
 
-
 def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Transforms raw crypto data into an unrolled, gap-safe machine learning
-    feature matrix with chronological integrity.
+    """Adds new features to the coin history data with advanced temporal, 
+    volumetric, and capital distribution lags.
     """
     df["dt"] = pd.to_datetime(df["dt"])
 
-    # 1. STRUCTURAL FIX: Build a continuous daily calendar grid per coin
+    # 1. STRUCTURAL TIMELINE GAPS CORRECTION
     df = df.set_index("dt").groupby("coin_id").resample("D").asfreq().reset_index()
 
-    # 2. CORE TARGETS & LOOKBACK LAGS
-    # Tomorrow's target price (T+1)
-    df["next_price"] = df.groupby("coin_id")["price_usd"].shift(-1)
+    # 2. CORE TARGETS & PRICE LAG ENGINE
+    df["price_lead"] = df.groupby("coin_id")["price_usd"].shift(-1)
 
-    # Generate 7 days of historical lookback prices (Lags 1 through 7)
     for lag in range(1, 8):
         df[f"price_lag_{lag}"] = df.groupby("coin_id")["price_usd"].shift(lag)
 
-    # 3. STATISTICAL FEATURES
-    # 7-day trend (Trajectory direction)
-    df["7d_trend"] = df["price_lag_1"] - df["price_lag_7"]
-
-    # Sstandard deviation across lookback lags
-    lag_cols = [f"price_lag_{i}" for i in range(1, 8)]
-    df["7d_std"] = df[lag_cols].std(axis=1, skipna=False, ddof=1)  # type: ignore
-
-    # Horizontal Vectorized asymmetry distribution (Skewness)
-    df["price_skew_7d"] = df[lag_cols].skew(axis=1)  # type: ignore
-
-    # 4. TIME & CALENDAR ENGINE
-    df["day_of_week"] = df["dt"].dt.dayofweek  # Mon=0, Sun=6
-    df["is_weekend"] = df["day_of_week"].isin([5, 6]).astype(int)
-    df["week_of_year"] = df["dt"].dt.isocalendar().week.astype(int)
-
-    # 5. DICTIONARY PAYLOAD EXTRACTIONS
-    # Extract nested node values safely using an isolated extraction lambda
+    # 3. DICTIONARY PAYLOAD EXTRACTIONS
     def safe_extract(x, field):
         if not isinstance(x, dict):
             return np.nan
@@ -78,34 +58,45 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
             return np.nan
         return market_data.get(field, {}).get("usd", np.nan)
 
-    df["market_cap_usd"] = df["raw_payload"].apply(
-        lambda x: safe_extract(x, "market_cap")
-    )
-    df["volume_usd"] = df["raw_payload"].apply(
-        lambda x: safe_extract(x, "total_volume")
-    )
+    df["mcap_usd"] = df["raw_payload"].apply(lambda x: safe_extract(x, "market_cap"))
+    df["volume_usd"] = df["raw_payload"].apply(lambda x: safe_extract(x, "total_volume"))
+
+    # 4. VOLUME & MARKET CAP MOMENTUM LAGS
+    for lag in [1, 2, 3, 7]:
+        df[f"volume_lag_{lag}"] = df.groupby("coin_id")["volume_usd"].diff(lag)
+        df[f"mcap_lag_{lag}"] = df.groupby("coin_id")["mcap_usd"].diff(lag)
+
+    # Rolling statistical metrics for volume volatility over the past week
+    vol_lag_cols = [f"volume_lag_{i}" for i in [1, 2, 3]]
+    df["volume_3d_std"] = df[vol_lag_cols].std(axis=1, ddof=1) #type: ignore
+    df["volume_7d_trend"] =  df["volume_lag_1"] - df["volume_lag_7"]
+
+
+    # 5. STATISTICAL PRICE FEATURES
+    df["price_7d_trend"] = df["price_lag_1"] - df["price_lag_7"]
+
+    lag_cols = [f"price_lag_{i}" for i in range(1, 8)]
+    df["price_7d_std"] = df[lag_cols].std(axis=1, skipna=False, ddof=1)
+    df["price_skew_7d"] = df[lag_cols].skew(axis=1) #type: ignore
 
     # 6. TRANSACTION LIQUIDITY DYNAMICS
-    # Volume Velocity: Ratio of today's volume vs yesterday's volume (with zero-division guard)
     prev_volume = df.groupby("coin_id")["volume_usd"].shift(1)
     df["volume_velocity"] = df["volume_usd"] / (prev_volume + 1e-8)
+    df["log_volume_price_interaction"] = np.log1p(df["price_usd"] * df["volume_usd"])
 
-    # Log-Scaled Price-Volume interaction index (Liquidity absolute magnitude proxy)
-    raw_interaction = df["price_usd"] * df["volume_usd"]
-    df["log_volume_price_interaction"] = np.log1p(raw_interaction)
+    # 7. TIME & CALENDAR ENGINE
+    df["day_of_week"] = df["dt"].dt.dayofweek
+    df["is_weekend"] = df["day_of_week"].isin([5, 6]).astype(int)
+    df["week_of_year"] = df["dt"].dt.isocalendar().week.astype(int)
 
-    # Extract unique years from data to cleanly pull correct holiday maps
     unique_years = df["dt"].dt.year.dropna().unique().tolist()
-
-    # Initialize multi-year country holiday objects
     us_holidays = holidays.US(years=unique_years)
     cn_holidays = holidays.China(years=unique_years)
 
-    # Map boolean flags (1 if holiday, 0 if normal day)
     df["is_us_holiday"] = df["dt"].apply(lambda x: int(x in us_holidays))
     df["is_china_holiday"] = df["dt"].apply(lambda x: int(x in cn_holidays))
 
-    # Drop artificial resampled placeholder empty rows
+    # 8. POST-ENGINEERING CLEANUP
     df = df.dropna(subset=["price_usd"])
 
     return df
