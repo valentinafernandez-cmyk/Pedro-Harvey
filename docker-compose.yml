@@ -1,17 +1,33 @@
 services:
   db:
-    image: postgres:14.23-bookworm
-    container_name: muttdata-challenge
+    image: postgres:14-bookworm
+    container_name: crypto-db
     restart: always
     environment:
       POSTGRES_USER: ${DB_USER}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_DB: ${DB_NAME}
     ports:
-      - "5432:5432"
+      - "5432:${DB_PORT}"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./schema/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: pg_isready -U $$DB_USER -d $$DB_NAME
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  app:
+    build: .
+    container_name: crypto-app
+    restart: always
+    env_file: .env
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
 
 volumes:
   postgres_data:
