@@ -4,7 +4,7 @@ DATE ?= $(shell date +%Y-%m-%d)
 END_DATE ?=
 DB_FLAG ?= --db
 
-.PHONY: up down logs shell fetch fetch-range drop-recovery monthly-avg train
+.PHONY: up down logs shell fetch fetch-range drop-recovery monthly-avg forecast risk-summary plot
 
 # --- CONTROL DEL ENTORNO ---
 
@@ -41,5 +41,11 @@ drop-recovery:
 monthly-avg:
 	docker compose exec app uv run cli.py monthly-avg
 
+risk-summary:
+	docker compose exec app env PYTHONPATH=. uv run python -c "from analytics.feature_engineering import get_risk_summary; get_risk_summary()"
+
 forecast:
-	docker compose exec app uv run analytics/forecasting.py
+	docker compose exec app env PYTHONPATH=. uv run analytics/forecasting.py
+
+plot:
+	docker compose exec app env PYTHONPATH=. uv run analytics/data-visualization.py

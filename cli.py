@@ -7,6 +7,7 @@ from typing import Optional
 import click
 import httpx
 from dotenv import load_dotenv
+from utils import parse_date, save_to_json
 
 # SQLAlchemy Async Dependencies
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
@@ -23,18 +24,6 @@ API_BASE_URL = "https://api.coingecko.com/api/v3/coins/{coin_id}/history"
 DATE_FORMAT = "%Y-%m-%d"
 
 Base = automap_base()
-
-
-def _save_to_json(filepath, data):
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
-
-
-def parse_date(date_str: str) -> datetime:
-    try:
-        return datetime.strptime(date_str, DATE_FORMAT)
-    except ValueError:
-        raise click.BadParameter("Date must be in YYYY-MM-DD format.")
 
 
 async def write_to_db(
@@ -138,7 +127,7 @@ async def fetch_daily_data(
                     await write_to_db(session, coin_id, date, data)
         else:
             filepath = f"{coin_id}_{date}.json"
-            _save_to_json(filepath, data)
+            save_to_json(filepath, data)
         return True
     except Exception:
         return False

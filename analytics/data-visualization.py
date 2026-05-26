@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 import pandas as pd
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
+from utils import load_table_to_dataframe
 
 # Load environment variables
 load_dotenv()
@@ -47,7 +47,7 @@ def generate_and_save_plots(df: pd.DataFrame, output_dir: str):
         ax.grid(True, linestyle="--", alpha=0.5)
 
         plt.title(
-            f"{style['label']} Price Trend - Last 30 Days",
+            f"{style['label']} Price Trend",
             fontsize=13,
             fontweight="bold",
             pad=15,
@@ -64,17 +64,7 @@ def generate_and_save_plots(df: pd.DataFrame, output_dir: str):
 
 
 if __name__ == "__main__":
-    db_url = os.getenv("DATABASE_URL")
-
-    if not db_url:
-        raise ValueError("❌ DATABASE_URL is missing from the environment.")
-
-    if db_url.startswith("postgresql+asyncpg://"):
-        db_url = db_url.replace("postgresql+asyncpg://", "postgresql://")
-    engine = create_engine(db_url)
-
-    with engine.connect() as connection:
-        df = pd.read_sql_table(table_name="daily_coin_data", con=connection)
+    df = load_table_to_dataframe('daily_coin_data')
 
     # Plot data processing
     cutoff_date = datetime.now() - timedelta(days=30)  # Last 30 days
