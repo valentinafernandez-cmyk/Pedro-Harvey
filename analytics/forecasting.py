@@ -5,26 +5,19 @@ import pandas as pd
 from typing import Dict, Any, Optional, Union, List
 from lightgbm import LGBMRegressor
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_absolute_error
-from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
-from sqlalchemy import create_engine
+from utils import load_table_to_dataframe
 
 # Pull in our custom technical indicators and lag setups
 from feature_engineering import engineer_features
 
 
-async def run_forecast(
-    df: pd.DataFrame, param_grid: Optional[Dict[str, Union[List[Any], Any]]] = None
-):
-    # Quick sanity check: clear out any hidden SQLAlchemy custom object proxies leaking from the DB
-    df.columns = df.columns.astype(str)
-
-    print("⚙️ Engineering advanced risk and mathematical trend matrices...")
+async def run_forecast(df: pd.DataFrame):
+    print("⚙️ Engineering features...")
     enriched_df = engineer_features(df)
     enriched_df.columns = enriched_df.columns.astype(str)
 
     # -------------------------------------------------------------------------
-    # 1. Split the dataset chronologically (No future data bleeding allowed!)
+    # 1. Split the dataset chronologically
     # -------------------------------------------------------------------------
     enriched_df = enriched_df.sort_values("dt").reset_index(drop=True)
 
@@ -75,11 +68,11 @@ async def run_forecast(
         )
     )
 
-    # Model 1 uses minimalist structural indicators to find the baseline trend
-    lr_features = mcap_lags_cols
+    # Model 1 features
+    lr_features = mcap_lags_cols + price_lags_cols
 
-    # Model 2 uses deep, unrolled non-linear feature matrices and categorical hooks
-    lgb_features = general_cols + calendar_cols + ["coin_id"]
+    # Model 2 features
+    lgb_features = calendar_cols + general_cols
 
     # Drop incomplete data records and force a hard copy to dodge the SettingWithCopy warning
     train_data = enriched_df[train_mask].dropna(subset=required_cols).copy()
@@ -119,51 +112,22 @@ async def run_forecast(
     train_residuals = y_train - lr_train_pred
 
     # -------------------------------------------------------------------------
-    # 4. Spin up the LightGBM challenger to learn from the linear errors
+    # 4. Spin up the LightGBM to learn from the residuals
     # -------------------------------------------------------------------------
     X_train_lgb = X_train[lgb_features]
     X_test_lgb = X_test[lgb_features]
 
-    # Intelligently decide if we are performing a tuning sweep or a fast compilation
-    is_grid_search = param_grid is not None and any(
-        isinstance(v, list) for v in param_grid.values()
-    )
+    params = {
+        "n_estimators": 100,
+        "learning_rate": 0.005,
+        "num_leaves": 7,
+        "min_child_samples": 100,
+        "random_state": 42,
+        "verbose": -1,
+    }
 
-    if is_grid_search:
-        print("🔍 Tuning Categorical LightGBM via TimeSeries Split Grid Search...")
-        tscv = TimeSeriesSplit(n_splits=5)
-        base_lgb = LGBMRegressor(random_state=42, verbose=-1)
-
-        grid_search = GridSearchCV(
-            estimator=base_lgb,
-            param_grid=param_grid,  # type: ignore
-            cv=tscv,
-            scoring="neg_mean_absolute_error",
-            n_jobs=-1,
-        )
-        await asyncio.to_thread(grid_search.fit, X_train_lgb, train_residuals)
-        print(f"🏆 Best Residual Model Parameters: {grid_search.best_params_}")
-        lgb_residual_model = grid_search.best_estimator_
-    else:
-        print(
-            "⚡ Bypassing Grid Search. Compiling LightGBM model with config arguments..."
-        )
-        default_params = {
-            "n_estimators": 100,
-            "learning_rate": 0.005,
-            "num_leaves": 7,
-            "min_child_samples": 100,
-            "random_state": 42,
-            "verbose": -1,
-        }
-
-        if param_grid:
-            default_params.update(
-                {k: v for k, v in param_grid.items() if not isinstance(v, list)}
-            )
-
-        lgb_residual_model = LGBMRegressor(**default_params)
-        await asyncio.to_thread(lgb_residual_model.fit, X_train_lgb, train_residuals)
+    lgb_residual_model = LGBMRegressor(**params)
+    await asyncio.to_thread(lgb_residual_model.fit, X_train_lgb, train_residuals)
 
     # Save our clean out-of-sample prediction adjustments
     test_data["lr_residuals"] = y_test - test_data["lr_pred"].values
@@ -242,24 +206,5 @@ async def run_forecast(
 
 
 if __name__ == "__main__":
-    db_url = os.getenv("DATABASE_URL")
-
-    if not db_url:
-        raise ValueError("❌ DATABASE_URL is missing from the environment.")
-
-    if db_url.startswith("postgresql+asyncpg://"):
-        db_url = db_url.replace("postgresql+asyncpg://", "postgresql://")
-    engine = create_engine(db_url)
-
-    with engine.connect() as connection:
-        df = pd.read_sql_table(table_name="daily_coin_data", con=connection)
-
-    grid_search_space = {
-        "n_estimators": [30, 50, 80],
-        "learning_rate": [0.001, 0.005, 0.01],
-        "num_leaves": [3, 5, 7],
-        "min_child_samples": [30, 50, 100],
-    }
-
-    # Point this to `grid_search_space` whenever you're ready to trigger optimization searches!
-    asyncio.run(run_forecast(df, param_grid=None))
+    df = load_table_to_dataframe("daily_coin_data")
+    asyncio.run(run_forecast(df))
