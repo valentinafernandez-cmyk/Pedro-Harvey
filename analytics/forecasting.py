@@ -1,35 +1,30 @@
 import os
-import json
+import asyncio
 import numpy as np
 import pandas as pd
+from typing import Dict, Any, Optional, Union, List
 from lightgbm import LGBMRegressor
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_absolute_error, root_mean_squared_error
-from sklearn.model_selection import TimeSeriesSplit, GridSearchCV  # Added for hyperparameter tuning
-from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_absolute_error
+from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
 from sqlalchemy import create_engine
 
-# IMPORT LOCAL FEATURE ENGINEERING MATRIX ENGINE
+# Pull in our custom technical indicators and lag setups
 from feature_engineering import engineer_features
 
-if __name__ == "__main__":
-    db_url = os.getenv("DATABASE_URL")
 
-    if not db_url:
-        raise ValueError("❌ DATABASE_URL is missing from the environment.")
-
-    if db_url.startswith("postgresql+asyncpg://"):
-        db_url = db_url.replace("postgresql+asyncpg://", "postgresql://")
-    engine = create_engine(db_url)
-
-    with engine.connect() as connection:
-        df = pd.read_sql_table(table_name="daily_coin_data", con=connection)
+async def run_forecast(
+    df: pd.DataFrame, param_grid: Optional[Dict[str, Union[List[Any], Any]]] = None
+):
+    # Quick sanity check: clear out any hidden SQLAlchemy custom object proxies leaking from the DB
+    df.columns = df.columns.astype(str)
 
     print("⚙️ Engineering advanced risk and mathematical trend matrices...")
     enriched_df = engineer_features(df)
+    enriched_df.columns = enriched_df.columns.astype(str)
 
     # -------------------------------------------------------------------------
-    # 1. CHRONOLOGICAL DATASET SPLIT
+    # 1. Split the dataset chronologically (No future data bleeding allowed!)
     # -------------------------------------------------------------------------
     enriched_df = enriched_df.sort_values("dt").reset_index(drop=True)
 
@@ -49,164 +44,222 @@ if __name__ == "__main__":
     train_mask = enriched_df["dt"] < cut_point_date
     test_mask = enriched_df["dt"] >= cut_point_date
 
-    cols_to_scale = [
+    # Group features
+    general_cols = [
         "price_7d_std",
         "price_7d_trend",
         "price_skew_7d",
-        "volume_velocity",
-        "log_volume_price_interaction",
         "volume_3d_std",
-        "volume_7d_trend",
-        "mcap_usd",
-        "volume_usd"
-
+        "volume_3d_trend",
     ]
-    cols_to_scale += [f"price_lag_{i}" for i in range(1, 8)]
-    cols_to_scale += [f"volume_lag_{i}" for i in [1, 2, 3, 7]]
-    cols_to_scale += [f"mcap_lag_{i}" for i in [1, 2, 3, 7]] 
-
-    passthrough_cols = [
+    calendar_cols = [
         "day_of_week",
         "is_weekend",
         "week_of_year",
         "is_us_holiday",
         "is_china_holiday",
     ]
+    price_lags_cols = [f"price_lag_{i}" for i in range(1, 8)]
+    volume_lags_cols = [f"volume_lag_{i}" for i in range(1, 4)]
+    mcap_lags_cols = [f"mcap_lag_{i}" for i in range(1, 4)]
 
-    feature_cols = cols_to_scale + passthrough_cols
-    required_cols = feature_cols + ["price_lead"]
+    # We need this master list to strip out dirty rows containing NaNs before modeling
+    required_cols = list(
+        set(
+            general_cols
+            + calendar_cols
+            + price_lags_cols
+            + volume_lags_cols
+            + mcap_lags_cols
+            + ["price_lead", "coin_id", "price_usd"]
+        )
+    )
 
+    # Model 1 uses minimalist structural indicators to find the baseline trend
+    lr_features = mcap_lags_cols
+
+    # Model 2 uses deep, unrolled non-linear feature matrices and categorical hooks
+    lgb_features = general_cols + calendar_cols + ["coin_id"]
+
+    # Drop incomplete data records and force a hard copy to dodge the SettingWithCopy warning
     train_data = enriched_df[train_mask].dropna(subset=required_cols).copy()
     test_data = enriched_df[test_mask].dropna(subset=required_cols).copy()
 
-    # -------------------------------------------------------------------------
-    # 2. PER-COIN FEATURE NORMALIZATION
-    # -------------------------------------------------------------------------
-    print("⚖️ Normalizing feature matrices per individual asset...")
-    
-    # Structural fix: Initialize datasets with native shapes and passthrough columns
-    X_train = train_data[feature_cols].copy().astype(float)
-    X_test = test_data[feature_cols].copy().astype(float)
-    coin_scalers = {}
+    # Flatten out our column blocks using array unpacking for type casting
+    cat_cols = [*calendar_cols, "coin_id"]
+    num_cols = [*general_cols, *price_lags_cols, *volume_lags_cols, *mcap_lags_cols]
 
-    for coin_id, group in train_data.groupby("coin_id"):
-        scaler = StandardScaler()
-        scaler.fit(group[cols_to_scale])
-        coin_scalers[coin_id] = scaler
-        X_train.loc[group.index, cols_to_scale] = scaler.transform(group[cols_to_scale])
+    # Batch process type conversions natively to keep things clean and speedy
+    for dataset in (train_data, test_data):
+        dataset[cat_cols] = dataset[cat_cols].astype("category")
+        dataset[num_cols] = dataset[num_cols].astype(float)
 
-    for coin_id, group in test_data.groupby("coin_id"):
-        scaler = coin_scalers[coin_id]
-        X_test.loc[group.index, cols_to_scale] = scaler.transform(group[cols_to_scale])
-        
+    X_train = train_data[required_cols]
+    X_test = test_data[required_cols]
+
+    # Extract target vector arrays
+    y_train = train_data["price_lead"].values
+    y_test = test_data["price_lead"].values
 
     # -------------------------------------------------------------------------
-    # 3. DEFINE THE SCALE-AGNOSTIC TARGET
+    # 3. Establish our primary baseline using standard Linear Regression
     # -------------------------------------------------------------------------
-    y_train_ratio = train_data["price_lead"] / train_data["price_lag_1"]
-    y_test_ratio = test_data["price_lead"] / test_data["price_lag_1"]
+    print("📈 Fitting global Linear Regression baseline model...")
+    X_train_lr = X_train[lr_features]
+    X_test_lr = X_test[lr_features]
 
-    print(f"🚀 Data matrices anchored. Train rows: {len(X_train)}, Test rows: {len(X_test)}")
-
-    # -------------------------------------------------------------------------
-    # 4. BASELINE: LINEAR REGRESSION
-    # -------------------------------------------------------------------------
     lr_model = LinearRegression()
-    lr_model.fit(X_train, y_train_ratio)
+    lr_model.fit(X_train_lr, y_train)
 
-    lr_pred_ratio = lr_model.predict(X_test)
-    test_data["lr_pred_usd"] = lr_pred_ratio * test_data["price_lag_1"]
+    lr_pred = lr_model.predict(X_test_lr)
+    test_data["lr_pred"] = lr_pred
+
+    # Keep track of training errors so LightGBM knows what's left to fix
+    lr_train_pred = lr_model.predict(X_train_lr)
+    train_residuals = y_train - lr_train_pred
 
     # -------------------------------------------------------------------------
-    # 5. CHALLENGER: LIGHTGBM WITH TIME-SERIES GRID SEARCH
+    # 4. Spin up the LightGBM challenger to learn from the linear errors
     # -------------------------------------------------------------------------
-    print("🔍 Executing Chronological Grid Search for LightGBM parameters...")
-    
-    # TimeSeriesSplit prevents data leakage during internal cross-validation folds
-    tscv = TimeSeriesSplit(n_splits=5)
-    
-    base_lgb = LGBMRegressor(random_state=42, verbose=-1)
-    
-    # Params space
-    param_grid = {
-        'n_estimators': [100, 150],
-        'learning_rate': [0.01, 0.02, 0.005],
-        'num_leaves': [7, 10, 13],
-        'min_child_samples': [10, 20, 50],
-    }
-    
-    grid_search = GridSearchCV(
-        estimator=base_lgb,
-        param_grid=param_grid,
-        cv=tscv,
-        scoring='neg_mean_absolute_error',
-        n_jobs=-1
+    X_train_lgb = X_train[lgb_features]
+    X_test_lgb = X_test[lgb_features]
+
+    # Intelligently decide if we are performing a tuning sweep or a fast compilation
+    is_grid_search = param_grid is not None and any(
+        isinstance(v, list) for v in param_grid.values()
     )
-    
-    grid_search.fit(X_train, y_train_ratio)
-    
-    print(f"🏆 Grid Search Optimal Parameters: {grid_search.best_params_}")
-    lgb_model = grid_search.best_estimator_
 
-    lgb_pred_ratio = lgb_model.predict(X_test)
-    test_data["lgb_pred_usd"] = lgb_pred_ratio * test_data["price_lag_1"]
+    if is_grid_search:
+        print("🔍 Tuning Categorical LightGBM via TimeSeries Split Grid Search...")
+        tscv = TimeSeriesSplit(n_splits=5)
+        base_lgb = LGBMRegressor(random_state=42, verbose=-1)
+
+        grid_search = GridSearchCV(
+            estimator=base_lgb,
+            param_grid=param_grid,  # type: ignore
+            cv=tscv,
+            scoring="neg_mean_absolute_error",
+            n_jobs=-1,
+        )
+        await asyncio.to_thread(grid_search.fit, X_train_lgb, train_residuals)
+        print(f"🏆 Best Residual Model Parameters: {grid_search.best_params_}")
+        lgb_residual_model = grid_search.best_estimator_
+    else:
+        print(
+            "⚡ Bypassing Grid Search. Compiling LightGBM model with config arguments..."
+        )
+        default_params = {
+            "n_estimators": 100,
+            "learning_rate": 0.005,
+            "num_leaves": 7,
+            "min_child_samples": 100,
+            "random_state": 42,
+            "verbose": -1,
+        }
+
+        if param_grid:
+            default_params.update(
+                {k: v for k, v in param_grid.items() if not isinstance(v, list)}
+            )
+
+        lgb_residual_model = LGBMRegressor(**default_params)
+        await asyncio.to_thread(lgb_residual_model.fit, X_train_lgb, train_residuals)
+
+    # Save our clean out-of-sample prediction adjustments
+    test_data["lr_residuals"] = y_test - test_data["lr_pred"].values
+    test_data["lgb_pred"] = lgb_residual_model.predict(X_test_lgb)
 
     # -------------------------------------------------------------------------
-    # 6. GRANULAR PER-COIN PERFORMANCE COMPETITION REPORT (USD & % SCALE)
+    # 5. Build our granular, per-asset competition evaluation report
     # -------------------------------------------------------------------------
-    print("\n" + "=" * 105)
-    print(f"{'🏆 COIN-BY-COIN PERFORMANCE BREAKDOWN (USD & PERCENTAGE ERROR)':^105}")
-    print("=" * 105)
+    print("\n" + "=" * 95)
+    print(f"{'🏆 COMPREHENSIVE TRI-MODEL BALANCED LEADERS BREAKDOWN':^95}")
+    print("=" * 95)
     print(
-        f"{'Coin ID':<12} | {'LR MAE ($)':<12} | {'LR MAPE (%)':<12} | {'LGB MAE ($)':<12} | {'LGB MAPE (%)':<12} | {'LGB vs LR (MAPE)'}"
+        f"{'Coin ID':<12} | "
+        f"{'LR MAPE (%)':<12} | "
+        f"{'Hybrid MAPE (%)':<16} | "
+        f"{'Hybrid Shift'}"
     )
-    print("-" * 105)
+    print("-" * 95)
 
-    all_lr_mapes = []
-    all_lgb_mapes = []
+    global_lr_errors, global_hybrid_errors = [], []
 
     for coin_id, group in test_data.groupby("coin_id"):
-        y_true = group["price_lead"]
-        y_lr = group["lr_pred_usd"]
-        y_lgb = group["lgb_pred_usd"]
+        y_true_price = group["price_lead"]
+        y_lr_price = group["lr_pred"]
+        pred_res = group["lgb_pred"]
 
-        coin_lr_mae = mean_absolute_error(y_true, y_lr)
-        coin_lgb_mae = mean_absolute_error(y_true, y_lgb)
+        # Recompose our separate predictions back into a final hybrid result
+        y_hybrid_price = y_lr_price + pred_res
 
-        lr_percentage_errors = np.abs(y_true - y_lr) / (y_true + 1e-8) * 100
-        lgb_percentage_errors = np.abs(y_true - y_lgb) / (y_true + 1e-8) * 100
+        # Calculate localized percentage errors safely
+        lr_pct = np.abs(y_true_price - y_lr_price) / y_true_price * 100
+        hybrid_pct = np.abs(y_true_price - y_hybrid_price) / y_true_price * 100
 
-        coin_lr_mape = np.mean(lr_percentage_errors)
-        coin_lgb_mape = np.mean(lgb_percentage_errors)
+        coin_lr_mape = np.mean(lr_pct)
+        coin_hybrid_mape = np.mean(hybrid_pct)
 
-        all_lr_mapes.extend(lr_percentage_errors.tolist())
-        all_lgb_mapes.extend(lgb_percentage_errors.tolist())
+        # Extend our global lists to track macro average updates correctly
+        global_lr_errors.extend(lr_pct.tolist())
+        global_hybrid_errors.extend(hybrid_pct.tolist())
 
-        mape_improvement = (
-            (coin_lr_mape - coin_lgb_mape) / (coin_lr_mape + 1e-8)
-        ) * 100
-        sign = "+" if mape_improvement >= 0 else ""
-        icon = "🟢" if mape_improvement >= 0 else "🔴"
+        # Measure performance improvement and apply intuitive, readable status indicators
+        improvement = (coin_lr_mape - coin_hybrid_mape) / coin_lr_mape * 100
+        status_str = (
+            f"-{improvement:>5.2f}% 🟢"
+            if improvement >= 0
+            else f"+{abs(improvement):>5.2f}% 🔴"
+        )
 
         print(
             f"{coin_id:<12} | "
-            f"${coin_lr_mae:<10,.2f} | {coin_lr_mape:<10.2f}% | "
-            f"${coin_lgb_mae:<10,.2f} | {coin_lgb_mape:<10.2f}% | "
-            f"{sign}{mape_improvement:>5.1f}% {icon}"
+            f"{coin_lr_mape:<12.2f}% | "
+            f"{coin_hybrid_mape:<16.2f}% | "
+            f"{status_str}"
         )
 
-    print("-" * 105)
-    
-    global_lr_mae = mean_absolute_error(test_data["price_lead"], test_data["lr_pred_usd"])
-    global_lgb_mae = mean_absolute_error(test_data["price_lead"], test_data["lgb_pred_usd"])
-    global_lr_mape = np.mean(all_lr_mapes)
-    global_lgb_mape = np.mean(all_lgb_mapes)
-    global_mape_improvement = ((global_lr_mape - global_lgb_mape) / global_lr_mape) * 100
-    
+    print("-" * 95)
+
+    # Compute overall unweighted macro averages across the portfolio
+    macro_lr_mape = np.mean(global_lr_errors)
+    macro_hybrid_mape = np.mean(global_hybrid_errors)
+
+    global_improvement = ((macro_lr_mape - macro_hybrid_mape) / macro_lr_mape) * 100
+    global_status = (
+        f"-{global_improvement:.2f}% 🟢"
+        if global_improvement >= 0
+        else f"+{abs(global_improvement):.2f}% 🔴"
+    )
+
     print(
         f"{'GLOBAL AVG':<12} | "
-        f"${global_lr_mae:<10,.2f} | {global_lr_mape:<10.2f}% | "
-        f"${global_lgb_mae:<10,.2f} | {global_lgb_mape:<10.2f}% | "
-        f"{'+' if global_mape_improvement >= 0 else ''}{global_mape_improvement:.1f}% {'🟢' if global_mape_improvement >= 0 else '🔴'}"
+        f"{macro_lr_mape:<12.2f}% | "
+        f"{macro_hybrid_mape:<16.2f}% | "
+        f"{global_status}"
     )
-    print("=" * 105)
+    print("=" * 95)
+
+
+if __name__ == "__main__":
+    db_url = os.getenv("DATABASE_URL")
+
+    if not db_url:
+        raise ValueError("❌ DATABASE_URL is missing from the environment.")
+
+    if db_url.startswith("postgresql+asyncpg://"):
+        db_url = db_url.replace("postgresql+asyncpg://", "postgresql://")
+    engine = create_engine(db_url)
+
+    with engine.connect() as connection:
+        df = pd.read_sql_table(table_name="daily_coin_data", con=connection)
+
+    grid_search_space = {
+        "n_estimators": [30, 50, 80],
+        "learning_rate": [0.001, 0.005, 0.01],
+        "num_leaves": [3, 5, 7],
+        "min_child_samples": [30, 50, 100],
+    }
+
+    # Point this to `grid_search_space` whenever you're ready to trigger optimization searches!
+    asyncio.run(run_forecast(df, param_grid=None))

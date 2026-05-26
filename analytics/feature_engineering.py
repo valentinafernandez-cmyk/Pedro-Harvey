@@ -11,7 +11,6 @@ load_dotenv()
 
 
 def get_risk_summary(df: pd.DataFrame) -> pd.Series:
-    # ✨ FIX: Copy the dataframe immediately to prevent modifying the global df
     df = df.sort_values(by=["coin_id", "dt"]).copy()
 
     # 1. Calculate daily percent change (delta)
@@ -34,22 +33,17 @@ def get_risk_summary(df: pd.DataFrame) -> pd.Series:
     # This creates a clean Series indexed by coin_id: e.g., bitcoin -> "Low risk"
     return overall_worst_drop.apply(assign_tier).rename("risk_tier")
 
+
 def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Adds new features to the coin history data with advanced temporal, 
-    volumetric, and capital distribution lags.
+    """Adds new features to the coin history data with advanced scale-agnostic
+    temporal, volumetric, and capital distribution ratio metrics.
     """
     df["dt"] = pd.to_datetime(df["dt"])
 
     # 1. STRUCTURAL TIMELINE GAPS CORRECTION
     df = df.set_index("dt").groupby("coin_id").resample("D").asfreq().reset_index()
 
-    # 2. CORE TARGETS & PRICE LAG ENGINE
-    df["price_lead"] = df.groupby("coin_id")["price_usd"].shift(-1)
-
-    for lag in range(1, 8):
-        df[f"price_lag_{lag}"] = df.groupby("coin_id")["price_usd"].shift(lag)
-
-    # 3. DICTIONARY PAYLOAD EXTRACTIONS
+    # 2. DICTIONARY PAYLOAD EXTRACTIONS (Moved up to support ratio anchors)
     def safe_extract(x, field):
         if not isinstance(x, dict):
             return np.nan
@@ -59,32 +53,42 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
         return market_data.get(field, {}).get("usd", np.nan)
 
     df["mcap_usd"] = df["raw_payload"].apply(lambda x: safe_extract(x, "market_cap"))
-    df["volume_usd"] = df["raw_payload"].apply(lambda x: safe_extract(x, "total_volume"))
+    df["volume_usd"] = df["raw_payload"].apply(
+        lambda x: safe_extract(x, "total_volume")
+    )
 
-    # 4. VOLUME & MARKET CAP MOMENTUM LAGS
-    for lag in [1, 2, 3, 7]:
-        df[f"volume_lag_{lag}"] = df.groupby("coin_id")["volume_usd"].diff(lag)
-        df[f"mcap_lag_{lag}"] = df.groupby("coin_id")["mcap_usd"].diff(lag)
+    # 3. CORE TARGETS & PRICE RATIO LAG ENGINE
+    df["price_lead"] = df.groupby("coin_id")["price_usd"].shift(-1) / df["price_usd"]
 
-    # Rolling statistical metrics for volume volatility over the past week
+    for lag in range(1, 8):
+        raw_price_lag = df.groupby("coin_id")["price_usd"].shift(lag)
+        # Ratio = Historical Price / Today's Price
+        df[f"price_lag_{lag}"] = raw_price_lag / df["price_usd"]
+
+    # 4. VOLUME & MARKET CAP MOMENTUM RATIO LAGS
+    for lag in [1, 2, 3]:
+        raw_vol_lag = df.groupby("coin_id")["volume_usd"].shift(lag)
+        raw_mcap_lag = df.groupby("coin_id")["mcap_usd"].shift(lag)
+
+        # Ratio = Historical Metric / Today's Metric
+        df[f"volume_lag_{lag}"] = raw_vol_lag / df["volume_usd"]
+        df[f"mcap_lag_{lag}"] = raw_mcap_lag / df["mcap_usd"]
+
+    # Rolling statistical metrics for volume volatility over the past week (now on ratio scale)
     vol_lag_cols = [f"volume_lag_{i}" for i in [1, 2, 3]]
-    df["volume_3d_std"] = df[vol_lag_cols].std(axis=1, ddof=1) #type: ignore
-    df["volume_7d_trend"] =  df["volume_lag_1"] - df["volume_lag_7"]
-
+    df["volume_3d_std"] = (df[vol_lag_cols].std(axis=1, ddof=1)) / df["volume_usd"]  # type: ignore
+    df["volume_3d_trend"] = (df["volume_lag_1"] - df["volume_lag_3"]) / df["volume_usd"]
 
     # 5. STATISTICAL PRICE FEATURES
-    df["price_7d_trend"] = df["price_lag_1"] - df["price_lag_7"]
-
     lag_cols = [f"price_lag_{i}" for i in range(1, 8)]
-    df["price_7d_std"] = df[lag_cols].std(axis=1, skipna=False, ddof=1)
-    df["price_skew_7d"] = df[lag_cols].skew(axis=1) #type: ignore
 
-    # 6. TRANSACTION LIQUIDITY DYNAMICS
-    prev_volume = df.groupby("coin_id")["volume_usd"].shift(1)
-    df["volume_velocity"] = df["volume_usd"] / (prev_volume + 1e-8)
-    df["log_volume_price_interaction"] = np.log1p(df["price_usd"] * df["volume_usd"])
+    df["price_7d_trend"] = (df["price_lag_1"] - df["price_lag_7"]) / df["price_usd"]
+    df["price_7d_std"] = (
+        df[lag_cols].std(axis=1, skipna=False, ddof=1) / df["price_usd"]
+    )  # type: ignore
+    df["price_skew_7d"] = df[lag_cols].skew(axis=1) / df["price_usd"]  # type: ignore
 
-    # 7. TIME & CALENDAR ENGINE
+    # 7. TIME & CALENDAR
     df["day_of_week"] = df["dt"].dt.dayofweek
     df["is_weekend"] = df["day_of_week"].isin([5, 6]).astype(int)
     df["week_of_year"] = df["dt"].dt.isocalendar().week.astype(int)
