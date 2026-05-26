@@ -2,15 +2,19 @@ import os
 import json
 import pandas as pd
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
 import numpy as np
 import holidays
+from utils import load_table_to_dataframe
 
 # Load environment variables
 load_dotenv()
 
 
-def get_risk_summary(df: pd.DataFrame) -> pd.Series:
+def get_risk_summary():
+    df = load_table_to_dataframe("daily_coin_data")
+
+    print("📋 Coin Risk Summary Dictionary:")
+
     df = df.sort_values(by=["coin_id", "dt"]).copy()
 
     # 1. Calculate daily percent change (delta)
@@ -31,7 +35,10 @@ def get_risk_summary(df: pd.DataFrame) -> pd.Series:
         return "Low risk"
 
     # This creates a clean Series indexed by coin_id: e.g., bitcoin -> "Low risk"
-    return overall_worst_drop.apply(assign_tier).rename("risk_tier")
+    risk_summary = overall_worst_drop.apply(assign_tier).rename("risk_tier").to_dict()
+
+    # Use json.dumps with an indent of 4 spaces for a clean, human-readable layout
+    print(json.dumps(risk_summary, indent=4))
 
 
 def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -104,51 +111,3 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.dropna(subset=["price_usd"])
 
     return df
-
-
-if __name__ == "__main__":
-    db_url = os.getenv("DATABASE_URL")
-
-    if not db_url:
-        raise ValueError("❌ DATABASE_URL is missing from the environment.")
-
-    if db_url.startswith("postgresql+asyncpg://"):
-        db_url = db_url.replace("postgresql+asyncpg://", "postgresql://")
-    engine = create_engine(db_url)
-
-    with engine.connect() as connection:
-        df = pd.read_sql_table(table_name="daily_coin_data", con=connection)
-
-    print("📋 Coin Risk Summary Dictionary:")
-
-    # Convert the Pandas Series to a raw Python dictionary
-    coin_risk_summary = get_risk_summary(df)
-    risk_dict = coin_risk_summary.to_dict()
-
-    # Use json.dumps with an indent of 4 spaces for a clean, human-readable layout
-    print(json.dumps(risk_dict, indent=4))
-    print("\n" + "=" * 80 + "\n")
-
-    print("⚙️ Engineering advanced risk and mathematical trend matrices...")
-    enriched_df = engineer_features(df)
-
-    # Group by coin_id and pull the last row for each group
-    sampled_df = enriched_df.groupby("coin_id").tail(3)
-
-    columns_to_hide = [
-        col
-        for col in [
-            "raw_payload",
-            "id",
-            "price_lag_7",
-            "price_lag_6",
-            "price_lag_5",
-            "price_lag_4",
-            "is_us_holiday",
-            "is_china_holiday",
-        ]
-        if col in sampled_df.columns
-    ]
-
-    # Drop the hidden columns on the fly right before printing
-    print(sampled_df.drop(columns=columns_to_hide).to_string(index=False))

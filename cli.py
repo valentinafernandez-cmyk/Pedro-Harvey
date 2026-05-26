@@ -7,6 +7,7 @@ from typing import Optional
 import click
 import httpx
 from dotenv import load_dotenv
+from utils import parse_date, save_to_json
 
 # SQLAlchemy Async Dependencies
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
@@ -15,30 +16,14 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy import select, func
 from sqlalchemy.dialects.postgresql import insert
 
-
 from queries.execute_query import execute_query
-
 
 load_dotenv()
 
 API_BASE_URL = "https://api.coingecko.com/api/v3/coins/{coin_id}/history"
 DATE_FORMAT = "%Y-%m-%d"
 
-# Global Automap Container
 Base = automap_base()
-
-
-def _save_to_json(filepath, data):
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
-
-
-def parse_date(date_str: str) -> datetime:
-    """Helper function to parse and validate date inputs."""
-    try:
-        return datetime.strptime(date_str, DATE_FORMAT)
-    except ValueError:
-        raise click.BadParameter("Date must be in YYYY-MM-DD format.")
 
 
 async def write_to_db(
@@ -52,14 +37,11 @@ async def write_to_db(
     MonthlyCoinAggregates = Base.classes.monthly_coin_aggregates
 
     dt = datetime.strptime(date_str, DATE_FORMAT).date()
-
-    # 2. Safely extract price from CoinGecko payload hierarchy
     price_usd = payload.get("market_data", {}).get("current_price", {}).get("usd")
 
     if price_usd is None:
         return
 
-    # 3. Daily coin data upsert
     daily_query = select(DailyCoinData).where(
         DailyCoinData.coin_id == coin_id, DailyCoinData.dt == dt
     )
@@ -74,12 +56,10 @@ async def write_to_db(
         )
         session.add(new_daily)
 
-    # 4. Monthly coin aggregates
     yr = dt.year
     mo = dt.month
     current_utc_time = datetime.now(timezone.utc).replace(tzinfo=None)
 
-    # Build the base PostgreSQL insertion statement
     stmt = insert(MonthlyCoinAggregates.__table__).values(
         coin_id=coin_id,
         yr=yr,
@@ -111,36 +91,46 @@ async def fetch_daily_data(
     date: str,
     api_key: str,
     session_factory: Optional[sessionmaker] = None,
+    silent_errors: bool = False,
 ) -> bool:
-    """Download historical coin data for a single day. Returns True if successful."""
+    """Download historical coin data for a single day with built-in retry backoff for 429 errors."""
     parse_date(date)
 
-    try:
-        params = {"date": datetime.strptime(date, DATE_FORMAT).date()}
-        headers = {"x-cg-demo-api-key": api_key}
+    url = API_BASE_URL.format(coin_id=coin_id)
+    params = {"date": datetime.strptime(date, DATE_FORMAT).date()}
 
-        response = await client.get(
-            API_BASE_URL.format(coin_id=coin_id),
-            params=params,
-            headers=headers,
-        )
+    headers = {"x-cg-demo-api-key": api_key}
+
+    try:
+        response = await client.get(url, params=params, headers=headers, timeout=10.0)
+
+        if response.status_code == 429:
+            if not silent_errors:
+                click.echo(
+                    f"\n🛑 429 Status Reached (API Rate Limit) at {date}. Fetch stopped."
+                )
+            return False
+
         response.raise_for_status()
         data = response.json()
 
     except Exception as e:
-        click.echo(f"\n⚠️ Error fetching {date}: {e}", err=True)
+        if not silent_errors:
+            click.echo(f"\n⚠️ Failed to fetch {date}: {e}", err=True)
         return False
 
-    # Routing Mechanism
-    if session_factory:
-        async with session_factory() as session:
-            async with session.begin():
-                await write_to_db(session, coin_id, date, data)
-    else:
-        filepath = f"{coin_id}_{date}.json"
-        _save_to_json(filepath, data)
-        
-    return True
+    # Enrutamiento a DB o JSON
+    try:
+        if session_factory:
+            async with session_factory() as session:
+                async with session.begin():
+                    await write_to_db(session, coin_id, date, data)
+        else:
+            filepath = f"{coin_id}_{date}.json"
+            save_to_json(filepath, data)
+        return True
+    except Exception:
+        return False
 
 
 async def main_async_flow(
@@ -150,7 +140,6 @@ async def main_async_flow(
     max_workers: int,
     api_key: str,
     db_flag: bool,
-    output_dir: Path,
     missing_only: bool = False,
 ) -> None:
     """Orchestrates IO target initialization, schema reflection, and concurrent task dispatching."""
@@ -173,11 +162,11 @@ async def main_async_flow(
     session_factory = None
 
     if db_flag:
-        click.echo("🔄 Connecting to database and reflecting tables...", nl=False)
+        click.echo("Connecting to database and reflecting tables...", nl=False)
         db_url = os.getenv("DATABASE_URL")
         if not db_url:
             raise click.ClickException(
-                "\nThe --db flag was activated, but DATABASE_URL is missing from environment."
+                "\nThe --db flag was activated, but DATABASE_URL is missing."
             )
 
         engine = create_async_engine(db_url)
@@ -187,16 +176,13 @@ async def main_async_flow(
         session_factory = sessionmaker(
             engine, class_=AsyncSession, expire_on_commit=False
         )
-        click.echo(" Connected! ✅")
+        click.echo(" Connected!")
     else:
+        output_dir = Path("./data")
         output_dir.mkdir(parents=True, exist_ok=True)
         os.chdir(output_dir)
 
-    # -------------------------------------------------------------------------
-    # DYNAMIC GAPS ANALYSIS PRE-SCREENING FILTER
-    # -------------------------------------------------------------------------
     if missing_only and session_factory:
-        click.echo("🔍 Pre-screening database for missing days...")
         DailyCoinData = Base.classes.daily_coin_data
 
         start_date_obj = start_dt.date()
@@ -217,90 +203,87 @@ async def main_async_flow(
 
         if skipped_count > 0:
             click.echo(
-                f"ℹ️ Found {skipped_count} days already present. Skipping those inputs."
+                f"Found {skipped_count} days already present. Skipping those dates."
             )
 
         if not dates_list:
-            click.echo(
-                "✨ All specified dates already exist in the database. Nothing to fetch!"
-            )
+            click.echo("All specified dates already exist. Nothing to fetch!")
             return
 
-    # Concurrency control via bounded worker execution pool
+    # Determinamos si silenciamos la consola basándonos en el volumen de días
+    is_range_fetch = len(dates_list) > 1
+    failed_dates = []
+
     semaphore = asyncio.Semaphore(max_workers)
 
-    # Click progress bar context manager
+    if is_range_fetch:
+        click.echo(f" Fetching {len(dates_list)} days for {coin_id}. Please wait...")
+
+    # Gestor de progreso condicional
     with click.progressbar(
         length=len(dates_list),
-        label=f"🚀 Fetching {coin_id} data",
+        label=f"📥 Processing {coin_id}",
         show_pos=True,
         fill_char="█",
-        empty_char="░"
+        empty_char="░",
     ) as bar:
 
         async def worker(date_str: str, client: httpx.AsyncClient):
             async with semaphore:
+                # Si es un rango largo, activamos el flag silent_errors para no romper la barra
                 success = await fetch_daily_data(
-                    client, coin_id, date_str, api_key, session_factory
+                    client,
+                    coin_id,
+                    date_str,
+                    api_key,
+                    session_factory,
+                    silent_errors=is_range_fetch,
                 )
-                # Update progress bar safely across async calls using Click's standard update
+                if not success:
+                    failed_dates.append(date_str)
                 bar.update(1)
                 return success
 
-        # Dispatch concurrent HTTP operations over a unified connection pool
         async with httpx.AsyncClient() as client:
             await asyncio.gather(
                 *(worker(d, client) for d in dates_list), return_exceptions=False
             )
 
-    # Clean final overview summary
-    target = "Postgres DB" if db_flag else f"local JSON files in '{output_dir}'"
+    target = "Postgres DB" if db_flag else "local JSON files"
+    successful_count = len(dates_list) - len(failed_dates)
+
+    click.echo("\n--- Fetch Summary ---")
     click.echo(
-        f"Successfully processed and saved {len(dates_list)} days to {target}!"
+        f"✅ Successfully processed: {successful_count}/{len(dates_list)} days saved to {target}."
     )
+
+    if failed_dates:
+        click.echo(
+            f"❌ Failed to fetch {len(failed_dates)} days (likely due to API Rate Limits):"
+        )
+        click.echo(f"   {', '.join(sorted(failed_dates))}")
 
 
 @click.group()
 def cli():
-    """Crypto Analysis Suite CLI - Fetch data or run analysis queries."""
     pass
 
 
 @cli.command(name="fetch")
 @click.argument("coin-id", type=str)
 @click.argument("start-date", type=str)
-@click.option("--end-date", type=str, default=None, help="Optional end date for range.")
-@click.option(
-    "--max-workers", default=3, show_default=True, help="Max fetching workers."
-)
-@click.option(
-    "--output-dir",
-    default="./data",
-    type=click.Path(file_okay=False, dir_okay=True, writable=True, path_type=Path),
-)
-@click.option("--db", is_flag=True, help="Store data directly into Postgres database.")
-@click.option(
-    "--missing-only",
-    is_flag=True,
-    help="Scan the database and download ONLY missing dates within the boundaries.",
-)
-@click.option(
-    "--api-key", envvar="COINGECKO_API_KEY", required=True, help="CoinGecko API Key."
-)
+@click.option("--end-date", type=str, default=None)
+@click.option("--max-workers", default=3, show_default=True)
+@click.option("--db", is_flag=True)
+@click.option("--missing-only", is_flag=True)
+@click.option("--api-key", envvar="COINGECKO_API_KEY", required=True)
 def fetch_coin_history(
-    coin_id, start_date, end_date, max_workers, output_dir, db, missing_only, api_key
+    coin_id, start_date, end_date, max_workers, db, missing_only, api_key
 ):
     """Download historical coin data from CoinGecko and store it."""
     asyncio.run(
         main_async_flow(
-            coin_id,
-            start_date,
-            end_date,
-            max_workers,
-            api_key,
-            db,
-            output_dir,
-            missing_only,
+            coin_id, start_date, end_date, max_workers, api_key, db, missing_only
         )
     )
 
