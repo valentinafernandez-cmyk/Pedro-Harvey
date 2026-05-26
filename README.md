@@ -36,29 +36,29 @@ docker compose exec -it app bash
 
 Once inside the container shell, run commands directly:
 
-#### 1. Fetch single day coin history. Save to db with `--db`
+#### 1. Fetch single day coin history.
 ```bash
-uv run cli.py fetch bitcoin 2025-05-26 --db
+make fetch COIN= DATE= DB_FLAG=
 ```
 
 #### 2. Fetch coin history for a range of dates. Include `--missing-only` to fetch only the missing dates in the range.
 ```bash
-uv run cli.py fetch bitcoin 2025-05-26 --end-date 2025-07-26 
+make fetch COIN= DATE= END_DATE= DB_FLAG=
 ```
 
 #### 3. Run drop and recovery analysis
 ```bash
-uv run cli.py drop-recovery
+make drop-recovery
 ```
 
 #### 4. Run monthly average analysis
 ```bash
-uv run cli.py monthly-avg
+make monthly-avg
 ```
 
 #### 5. Training and forecasting evaluation
 ```bash
-uv run analytics/forcasting.py
+make forecast
 ```
 
 
