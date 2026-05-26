@@ -1,5 +1,5 @@
 # Usamos la imagen oficial ligera de Python
-FROM python:3.8
+FROM python:3.14
 
 # Instalar uv directamente desde los binarios oficiales
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
