@@ -139,7 +139,7 @@ async def fetch_daily_data(
     else:
         filepath = f"{coin_id}_{date}.json"
         _save_to_json(filepath, data)
-        
+
     return True
 
 
@@ -150,7 +150,6 @@ async def main_async_flow(
     max_workers: int,
     api_key: str,
     db_flag: bool,
-    output_dir: Path,
     missing_only: bool = False,
 ) -> None:
     """Orchestrates IO target initialization, schema reflection, and concurrent task dispatching."""
@@ -189,6 +188,7 @@ async def main_async_flow(
         )
         click.echo(" Connected! ✅")
     else:
+        output_dir = Path("./data")
         output_dir.mkdir(parents=True, exist_ok=True)
         os.chdir(output_dir)
 
@@ -235,7 +235,7 @@ async def main_async_flow(
         label=f"🚀 Fetching {coin_id} data",
         show_pos=True,
         fill_char="█",
-        empty_char="░"
+        empty_char="░",
     ) as bar:
 
         async def worker(date_str: str, client: httpx.AsyncClient):
@@ -255,9 +255,7 @@ async def main_async_flow(
 
     # Clean final overview summary
     target = "Postgres DB" if db_flag else f"local JSON files in '{output_dir}'"
-    click.echo(
-        f"Successfully processed and saved {len(dates_list)} days to {target}!"
-    )
+    click.echo(f"Successfully processed and saved {len(dates_list)} days to {target}!")
 
 
 @click.group()
@@ -273,11 +271,6 @@ def cli():
 @click.option(
     "--max-workers", default=3, show_default=True, help="Max fetching workers."
 )
-@click.option(
-    "--output-dir",
-    default="./data",
-    type=click.Path(file_okay=False, dir_okay=True, writable=True, path_type=Path),
-)
 @click.option("--db", is_flag=True, help="Store data directly into Postgres database.")
 @click.option(
     "--missing-only",
@@ -288,7 +281,7 @@ def cli():
     "--api-key", envvar="COINGECKO_API_KEY", required=True, help="CoinGecko API Key."
 )
 def fetch_coin_history(
-    coin_id, start_date, end_date, max_workers, output_dir, db, missing_only, api_key
+    coin_id, start_date, end_date, max_workers, db, missing_only, api_key
 ):
     """Download historical coin data from CoinGecko and store it."""
     asyncio.run(
@@ -299,7 +292,6 @@ def fetch_coin_history(
             max_workers,
             api_key,
             db,
-            output_dir,
             missing_only,
         )
     )

@@ -3,7 +3,6 @@ import os
 import signal
 import logging
 from datetime import date
-from pathlib import Path
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from cli import main_async_flow
@@ -29,7 +28,6 @@ async def run_daily_crypto_fetch():
         return
 
     today_str = date.today().strftime("%Y-%m-%d")
-    data_dir = Path("./data")
 
     logger.info(f"--- Starting daily task for {today_str} ---")
 
@@ -41,7 +39,6 @@ async def run_daily_crypto_fetch():
             max_workers=1,
             api_key=API_KEY,
             db_flag=True,
-            output_dir=data_dir,
             missing_only=False,
         )
         for token in TOKENS
