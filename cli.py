@@ -12,7 +12,9 @@ from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.ext.automap import automap_base
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import select
+from sqlalchemy import select, func
+from sqlalchemy.dialects.postgresql import insert
+
 
 from queries.execute_query import execute_query
 
@@ -42,7 +44,10 @@ def parse_date(date_str: str) -> datetime:
 async def write_to_db(
     session: AsyncSession, coin_id: str, date_str: str, payload: dict
 ) -> None:
-    """Inserts daily coin data and recalculates monthly aggregate stats in the db."""
+    """Inserts daily coin data and recalculates monthly aggregate stats in the db safely
+
+    using concurrent-safe PostgreSQL upsert logic.
+    """
     DailyCoinData = Base.classes.daily_coin_data
     MonthlyCoinAggregates = Base.classes.monthly_coin_aggregates
 
@@ -74,30 +79,30 @@ async def write_to_db(
     mo = dt.month
     current_utc_time = datetime.now(timezone.utc).replace(tzinfo=None)
 
-    monthly_query = select(MonthlyCoinAggregates).where(
-        MonthlyCoinAggregates.coin_id == coin_id,
-        MonthlyCoinAggregates.yr == yr,
-        MonthlyCoinAggregates.mo == mo,
+    # Build the base PostgreSQL insertion statement
+    stmt = insert(MonthlyCoinAggregates.__table__).values(
+        coin_id=coin_id,
+        yr=yr,
+        mo=mo,
+        min_price_usd=price_usd,
+        max_price_usd=price_usd,
+        updated_at=current_utc_time,
     )
-    monthly_record = await session.scalar(monthly_query)
 
-    if monthly_record:
-        if price_usd < monthly_record.min_price_usd:
-            monthly_record.min_price_usd = price_usd
-        if price_usd > monthly_record.max_price_usd:
-            monthly_record.max_price_usd = price_usd
+    upsert_stmt = stmt.on_conflict_do_update(
+        constraint="monthly_coin_aggregates_pkey",
+        set_={
+            "min_price_usd": func.least(
+                MonthlyCoinAggregates.__table__.c.min_price_usd, price_usd
+            ),
+            "max_price_usd": func.greatest(
+                MonthlyCoinAggregates.__table__.c.max_price_usd, price_usd
+            ),
+            "updated_at": current_utc_time,
+        },
+    )
 
-        monthly_record.updated_at = current_utc_time
-    else:
-        new_monthly = MonthlyCoinAggregates(
-            coin_id=coin_id,
-            yr=yr,
-            mo=mo,
-            min_price_usd=price_usd,
-            max_price_usd=price_usd,
-            updated_at=current_utc_time,
-        )
-        session.add(new_monthly)
+    await session.execute(upsert_stmt)
 
 
 async def fetch_daily_data(
@@ -146,6 +151,7 @@ async def main_async_flow(
     api_key: str,
     db_flag: bool,
     output_dir: Path,
+    missing_only: bool = False,
 ) -> None:
     """Orchestrates IO target initialization, schema reflection, and concurrent task dispatching."""
     start_dt = parse_date(start_date)
@@ -186,9 +192,43 @@ async def main_async_flow(
         output_dir.mkdir(parents=True, exist_ok=True)
         os.chdir(output_dir)
 
+    # -------------------------------------------------------------------------
+    # DYNAMIC GAPS ANALYSIS PRE-SCREENING FILTER
+    # -------------------------------------------------------------------------
+    if missing_only and session_factory:
+        click.echo("🔍 Pre-screening database for missing days...")
+        DailyCoinData = Base.classes.daily_coin_data
+
+        start_date_obj = start_dt.date()
+        end_date_obj = parse_date(end_date).date() if end_date else start_date_obj
+
+        async with session_factory() as session:
+            query = select(DailyCoinData.dt).where(
+                DailyCoinData.coin_id == coin_id,
+                DailyCoinData.dt >= start_date_obj,
+                DailyCoinData.dt <= end_date_obj,
+            )
+            result = await session.scalars(query)
+            existing_dates = {d.strftime("%Y-%m-%d") for d in result.all()}
+
+        original_count = len(dates_list)
+        dates_list = [d for d in dates_list if d not in existing_dates]
+        skipped_count = original_count - len(dates_list)
+
+        if skipped_count > 0:
+            click.echo(
+                f"ℹ️ Found {skipped_count} days already present. Skipping those inputs."
+            )
+
+        if not dates_list:
+            click.echo(
+                "✨ All specified dates already exist in the database. Nothing to fetch!"
+            )
+            return
+
     # Concurrency control via bounded worker execution pool
     semaphore = asyncio.Semaphore(max_workers)
-    
+
     # Click progress bar context manager
     with click.progressbar(
         length=len(dates_list),
@@ -200,7 +240,9 @@ async def main_async_flow(
 
         async def worker(date_str: str, client: httpx.AsyncClient):
             async with semaphore:
-                success = await fetch_daily_data(client, coin_id, date_str, api_key, session_factory)
+                success = await fetch_daily_data(
+                    client, coin_id, date_str, api_key, session_factory
+                )
                 # Update progress bar safely across async calls using Click's standard update
                 bar.update(1)
                 return success
@@ -210,10 +252,12 @@ async def main_async_flow(
             await asyncio.gather(
                 *(worker(d, client) for d in dates_list), return_exceptions=False
             )
-            
+
     # Clean final overview summary
     target = "Postgres DB" if db_flag else f"local JSON files in '{output_dir}'"
-    click.echo(f"✨ Successfully processed and saved {len(dates_list)} days to {target}!")
+    click.echo(
+        f"Successfully processed and saved {len(dates_list)} days to {target}!"
+    )
 
 
 @click.group()
@@ -236,15 +280,27 @@ def cli():
 )
 @click.option("--db", is_flag=True, help="Store data directly into Postgres database.")
 @click.option(
+    "--missing-only",
+    is_flag=True,
+    help="Scan the database and download ONLY missing dates within the boundaries.",
+)
+@click.option(
     "--api-key", envvar="COINGECKO_API_KEY", required=True, help="CoinGecko API Key."
 )
 def fetch_coin_history(
-    coin_id, start_date, end_date, max_workers, output_dir, db, api_key
+    coin_id, start_date, end_date, max_workers, output_dir, db, missing_only, api_key
 ):
     """Download historical coin data from CoinGecko and store it."""
     asyncio.run(
         main_async_flow(
-            coin_id, start_date, end_date, max_workers, api_key, db, output_dir
+            coin_id,
+            start_date,
+            end_date,
+            max_workers,
+            api_key,
+            db,
+            output_dir,
+            missing_only,
         )
     )
 
